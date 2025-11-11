@@ -1,5 +1,3 @@
-# utils/database_use.py
-
 import sqlite3
 from contextlib import closing
 from datetime import datetime
@@ -17,7 +15,7 @@ def get_db_connection():
 
 def init_db():
     with get_db_connection() as conn, closing(conn.cursor()) as cur:
-        # базовая таблица
+        # базовая таблица users
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -36,12 +34,14 @@ def init_db():
                 direction TEXT,
                 course INTEGER,
                 photo_file_id TEXT,
-                about TEXT
+                about TEXT,
+                gender TEXT,
+                is_whitelisted INTEGER NOT NULL DEFAULT 0
             );
             """
         )
 
-        # простенькая "миграция" на случай старой БД (ALTER TABLE, если колонок нет)
+        # "миграция" — добавляем колонки, если БД уже была
         existing_cols = {
             row["name"]
             for row in cur.execute("PRAGMA table_info(users)").fetchall()
@@ -54,11 +54,68 @@ def init_db():
             "course": "INTEGER",
             "photo_file_id": "TEXT",
             "about": "TEXT",
+            "gender": "TEXT",
+            "is_whitelisted": "INTEGER NOT NULL DEFAULT 0",
         }
 
         for col_name, col_type in new_columns.items():
             if col_name not in existing_cols:
                 cur.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_type};")
+
+        # просмотры анкет (для ограничения раз в сутки)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS match_views (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                viewer_tg_id INTEGER NOT NULL,
+                target_tg_id INTEGER NOT NULL,
+                viewed_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            """
+        )
+
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_match_views_viewer_time "
+            "ON match_views (viewer_tg_id, viewed_at);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_match_views_viewer_target "
+            "ON match_views (viewer_tg_id, target_tg_id);"
+        )
+
+        # лайки / дизлайки
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS likes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                liker_tg_id INTEGER NOT NULL,
+                target_tg_id INTEGER NOT NULL,
+                is_like INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_likes_pair "
+            "ON likes (liker_tg_id, target_tg_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_likes_target "
+            "ON likes (target_tg_id);"
+        )
+
+        # матчи
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user1_tg_id INTEGER NOT NULL,
+                user2_tg_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(user1_tg_id, user2_tg_id)
+            );
+            """
+        )
 
         conn.commit()
 
@@ -82,9 +139,11 @@ def upsert_user(tg_user: User):
         if row is None:
             cur.execute(
                 """
-                INSERT INTO users (tg_id, username, first_name, last_name,
-                                   created_at, updated_at, verified, is_banned, is_admin)
-                VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0)
+                INSERT INTO users (
+                    tg_id, username, first_name, last_name,
+                    created_at, updated_at, verified, is_banned, is_admin, is_whitelisted
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0)
                 """,
                 (
                     tg_user.id,
@@ -150,11 +209,12 @@ def update_profile(
     course: int | None = None,
     photo_file_id: str | None = None,
     about: str | None = None,
+    gender: str | None = None,
 ):
     """
     Обновляет профиль пользователя. Обновляет только переданные поля.
     """
-    fields = {}
+    fields: dict[str, object] = {}
     if first_name is not None:
         fields["first_name"] = first_name
     if last_name is not None:
@@ -171,6 +231,8 @@ def update_profile(
         fields["photo_file_id"] = photo_file_id
     if about is not None:
         fields["about"] = about
+    if gender is not None:
+        fields["gender"] = gender
 
     if not fields:
         return
@@ -187,3 +249,90 @@ def update_profile(
     with get_db_connection() as conn, closing(conn.cursor()) as cur:
         cur.execute(query, values)
         conn.commit()
+
+
+def update_user_flags(
+    tg_id: int,
+    is_admin: int | None = None,
+    is_banned: int | None = None,
+    is_whitelisted: int | None = None,
+):
+    """
+    Обновляет флаги is_admin / is_banned / is_whitelisted.
+    Значения передавать 0/1 или None (если не менять).
+    """
+    fields: dict[str, object] = {}
+    if is_admin is not None:
+        fields["is_admin"] = int(bool(is_admin))
+    if is_banned is not None:
+        fields["is_banned"] = int(bool(is_banned))
+    if is_whitelisted is not None:
+        fields["is_whitelisted"] = int(bool(is_whitelisted))
+
+    if not fields:
+        return
+
+    now = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
+    set_parts = [f"{col} = ?" for col in fields.keys()]
+    values = list(fields.values())
+    set_parts.append("updated_at = ?")
+    values.append(now)
+    values.append(tg_id)
+
+    query = f"UPDATE users SET {', '.join(set_parts)} WHERE tg_id = ?"
+
+    with get_db_connection() as conn, closing(conn.cursor()) as cur:
+        cur.execute(query, values)
+        conn.commit()
+
+
+def list_users(search: str | None = None, limit: int = 200):
+    """
+    Возвращает список пользователей для админки.
+    search — поиск по username / имени / фамилии.
+    """
+    with get_db_connection() as conn, closing(conn.cursor()) as cur:
+        if search:
+            pattern = f"%{search}%"
+            cur.execute(
+                """
+                SELECT *
+                FROM users
+                WHERE
+                    username LIKE ?
+                    OR first_name LIKE ?
+                    OR last_name LIKE ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (pattern, pattern, pattern, limit),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT *
+                FROM users
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        return cur.fetchall()
+
+
+def get_display_name(user_row) -> str:
+    """
+    Красивое имя для уведомлений: Имя Фамилия / @username / id.
+    """
+    if user_row is None:
+        return "кто-то"
+
+    first = user_row["first_name"]
+    last = user_row["last_name"]
+    username = user_row["username"]
+
+    if first or last:
+        return " ".join(x for x in [first, last] if x).strip()
+    if username:
+        return f"@{username}"
+    return f"id {user_row['tg_id']}"

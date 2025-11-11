@@ -1,8 +1,8 @@
-BOT_TOKEN = "8100533223:AAG-vlmBHV0-kU62DAoAsSrM2oNZl-iij_s"
+BOT_TOKEN = "8350225727:AAHgYJPlKJEDyNzoTCCYaCOuR3W_mWklmJM"
 
 # Настройки SMTP сервера
 SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 465
+SMTP_PORT = 587
 SMTP_USER = "sashaiva314@gmail.com"
 SMTP_PASSWORD = "uzon aivr isrt hwwr"
 FROM_EMAIL = "sashaiva314@gmail.com"
