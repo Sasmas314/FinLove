@@ -1,16 +1,17 @@
 import sqlite3
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, UTC
 
 from utils.settings import DB_PATH
 
 
 def duplicate_and_shuffle_users():
-    now = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
+    now = datetime.now(UTC).isoformat(sep=" ", timespec="seconds")
 
-    with sqlite3.connect(DB_PATH) as conn, closing(conn.cursor()) as cur:
-        conn.row_factory = sqlite3.Row
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
 
+    with conn, closing(conn.cursor()) as cur:
         # 1️⃣ Получаем всех пользователей
         cur.execute("SELECT * FROM users")
         users = cur.fetchall()
